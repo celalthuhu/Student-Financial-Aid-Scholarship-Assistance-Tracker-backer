@@ -1,0 +1,177 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --color-primary: #0284c7;
+  --color-navy: #0f172a;
+  --color-cyan: #06b6d4;
+  --color-page: #f1f5f9;
+  --color-surface: #ffffff;
+  --color-border: #d7e0e9;
+  --color-border-strong: #b6c4d2;
+  --color-muted: #64748b;
+  --shadow-card: 0 2px 8px rgb(15 23 42 / 4%);
+  --radius-panel: 12px;
+  --focus-ring: 0 0 0 3px rgb(2 132 199 / 15%);
+  --space-section: 1.5rem;
+}
+
+@layer base {
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--color-page);
+    color: var(--color-navy);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  a, button { transition-duration: 150ms; }
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  ::selection { background: #bae6fd; color: var(--color-navy); }
+}
+
+@layer components {
+  .btn { @apply inline-flex items-center justify-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60; }
+  .btn-primary { @apply btn border-sky-700 bg-brand-deep text-white hover:bg-sky-700; }
+  .btn-secondary { @apply btn border-slate-300 bg-white text-ink hover:border-sky-400 hover:bg-sky-50 hover:text-sky-900; }
+  .btn-danger { @apply btn border-red-600 bg-red-600 text-white hover:bg-red-700; }
+  .btn-sm { @apply px-3 py-1.5 text-xs; }
+  .input { @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-ink placeholder:text-slate-400 transition-colors focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-brand/15 disabled:bg-slate-50; }
+  .label { @apply mb-1 block text-sm font-medium text-ink; }
+  .field-error { @apply mt-1 text-xs text-red-600; }
+  .card { @apply rounded-xl border border-slate-200 bg-white shadow-[0_2px_8px_rgba(15,23,42,0.04)]; }
+  .table-wrap { @apply overflow-x-auto; }
+  .data-table { @apply w-full min-w-[720px] border-separate border-spacing-0 text-left text-sm; }
+  .data-table thead { @apply bg-slate-50 text-xs font-semibold text-slate-600; }
+  .data-table th { @apply whitespace-nowrap px-4 py-3; }
+  .data-table td { @apply border-t border-slate-200 px-4 py-3 align-middle; }
+  .data-table tbody tr:nth-child(even) { @apply bg-slate-50/50; }
+  .data-table tbody tr:hover { @apply bg-sky-50; }
+}
+
+@layer utilities {
+  .text-muted { color: var(--color-muted); }
+}
+
+.card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.table-wrap {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface);
+}
+
+.input,
+input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not(.header-search-input),
+select,
+textarea {
+  border: 1px solid var(--color-border-strong);
+  border-radius: 9px;
+}
+
+.input:focus,
+input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not(.header-search-input):focus,
+select:focus,
+textarea:focus {
+  border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+[role="tablist"] {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+}
+
+[role="tablist"] a,
+[role="tablist"] button {
+  border-radius: 8px;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+[role="tablist"] a:hover,
+[role="tablist"] button:hover {
+  background-color: #f0f9ff;
+}
+
+[role="tablist"] [aria-selected="true"] {
+  box-shadow: 0 1px 3px rgb(15 23 42 / 8%);
+}
+
+button:not(:disabled):active,
+.btn:active {
+  transform: translateY(1px);
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+}
+
+.data-table tbody tr { transition: background-color 150ms ease; }
+
+.table-wrap:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
+}
+
+.student-portal [class~="ring-1"][class~="ring-slate-200"] {
+  border: 1.5px solid #bfd0df;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 5%);
+}
+
+.student-portal [class~="ring-1"][class~="ring-sky-100"] {
+  border: 1.5px solid #bfdbfe;
+  box-shadow: 0 2px 8px rgb(2 132 199 / 6%);
+}
+
+.student-portal article[class~="ring-1"],
+.student-portal a.group[class~="ring-1"] {
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.student-portal article[class~="ring-1"]:hover,
+.student-portal a.group[class~="ring-1"]:hover {
+  border-color: #7dd3fc;
+  box-shadow: 0 5px 14px rgb(2 132 199 / 9%);
+  transform: translateY(-1px);
+}
+
+.student-portal [data-role="STUDENT"] nav a[aria-current="page"] {
+  border-color: #bfdbfe;
+  background-color: #eff8ff;
+  color: #075985;
+}
+
+.student-portal input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="submit"]):not([type="button"]),
+.student-portal select,
+.student-portal textarea {
+  border-color: #aebfd0;
+}
+
+.student-portal input:focus,
+.student-portal select:focus,
+.student-portal textarea:focus {
+  border-color: var(--color-primary);
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
