@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
   ArrowRight, Bell, BookOpenCheck, Building2, CalendarDays, Check, CheckCircle2, ChevronRight, CircleHelp,
   Clock3, CloudUpload, FileCheck2, FileText, GraduationCap, Loader2, Search,
@@ -260,7 +260,12 @@ export function StudentWorkspace() {
   const [lowestGrade, setLowestGrade] = useState('');
   const [applicationFiles, setApplicationFiles] = useState<Record<string, File>>({});
   const [submitPending, setSubmitPending] = useState(false);
-  const [submitted, setSubmitted] = useState<{ reference: string; applicationId: string } | null>(null);
+  const [submitted, setSubmitted] = useState<{ reference: string; applicationId: string; status: string } | null>(null);
+  const [createdApplication, setCreatedApplication] = useState<{ id: string; application_no: string; status: string } | null>(null);
+  const [uploadedApplicationFiles, setUploadedApplicationFiles] = useState<Record<string, boolean>>({});
+  const [applicationFileErrors, setApplicationFileErrors] = useState<Record<string, string>>({});
+  const applicationDialogRef = useRef<HTMLElement>(null);
+  const submissionInFlight = useRef(false);
   const [detail, setDetail] = useState<ApplicationDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState('');
   const [uploading, setUploading] = useState('');
@@ -270,6 +275,60 @@ export function StudentWorkspace() {
   const draftKey = profile?.id ? `${DRAFT_KEY}:${profile.id}` : null;
   const latestApplication = applications[0] ?? null;
   const latestApplicationId = latestApplication?.id;
+  const requiredProgramRequirements = programRequirements.filter((requirement) => requirement.is_required);
+  const selectedRequiredDocuments = requiredProgramRequirements.filter((requirement) => applicationFiles[requirement.id]).length;
+
+  function closeApplication() {
+    if (submitPending) return;
+    if (createdApplication && !submitted) {
+      if (!window.confirm('Your application record has been created, but some documents are not confirmed uploaded. Close now? You can finish uploading from Requirements & Documents.')) return;
+      setApplyProgram(null);
+      return;
+    }
+    const hasUnsavedWork = Boolean(course.trim() || gwa || lowestGrade || Object.keys(applicationFiles).length);
+    if (hasUnsavedWork && !submitted && !window.confirm('Close this application? Your selected files will be discarded. Your academic details are saved in this browser.')) return;
+    setApplyProgram(null);
+  }
+
+  const closeApplicationRef = useRef(closeApplication);
+  closeApplicationRef.current = closeApplication;
+
+  useEffect(() => {
+    if (!applyProgram) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    applicationDialogRef.current?.focus();
+
+    function trapFocus(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeApplicationRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !applicationDialogRef.current) return;
+      const focusable = [...applicationDialogRef.current.querySelectorAll<HTMLElement>(
+        'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      )].filter((element) => element.getAttribute('aria-hidden') !== 'true');
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) return;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    window.addEventListener('keydown', trapFocus);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', trapFocus);
+      previouslyFocused?.focus();
+    };
+  }, [applyProgram]);
 
   const view = pathname.endsWith('/programs') ? 'programs'
     : pathname.endsWith('/applications') ? 'applications'
@@ -443,59 +502,144 @@ export function StudentWorkspace() {
     setGwa('');
     setLowestGrade('');
     setApplicationFiles({});
+    setCreatedApplication(null);
+    setUploadedApplicationFiles({});
+    setApplicationFileErrors({});
     setNotice('');
+  }
+
+  function continueApplication() {
+    if (!applyProgram) return;
+    setError('');
+    if (applyStep === 1) {
+      if (course.trim().length < 2) {
+        setError('Enter your course or academic program before continuing.');
+        return;
+      }
+      if (!isAcademic(applyProgram) && (!Number.isInteger(Number(yearLevel)) || Number(yearLevel) < 1 || Number(yearLevel) > 8)) {
+        setError('Enter a current year level from 1 to 8.');
+        return;
+      }
+      if (isAcademic(applyProgram)) {
+        const normalizedCourse = course.toLocaleLowerCase().replace(/[^a-z]/g, '');
+        if (!['bsed', 'beed', 'bssw'].includes(normalizedCourse)) {
+          setError('Academic Scholarship applications are limited to BS Ed, BE Ed, and BSSW. IT and HM are not eligible.');
+          return;
+        }
+        if (!gwa || !lowestGrade || Number(gwa) < 90 || Number(lowestGrade) < 85) {
+          setError('To continue, your GWA must be 90 or above and no subject grade may be below 85.');
+          return;
+        }
+      }
+      if (programRequirementsLoading) {
+        setError('Wait for the scholarship document checklist to finish loading.');
+        return;
+      }
+      const missingUploads = requiredProgramRequirements.filter((requirement) => !applicationFiles[requirement.id]);
+      if (missingUploads.length) {
+        setError(`Select the required documents before continuing: ${missingUploads.map((item) => item.name).join(', ')}.`);
+        return;
+      }
+      const invalidUploads = requiredProgramRequirements.filter((requirement) => applicationFileErrors[requirement.id]);
+      if (invalidUploads.length) {
+        setError('Fix the highlighted document issues before continuing.');
+        return;
+      }
+    }
+    setApplyStep((step) => Math.min(step + 1, 2));
+  }
+
+  function selectApplicationFile(requirement: Requirement, file: File | undefined, input: HTMLInputElement) {
+    if (!file) return;
+    const maxBytes = Math.min(requirement.max_file_size_bytes, 10 * 1024 * 1024);
+    let validationError = '';
+    if (file.size > maxBytes) {
+      const maxMb = Math.round(maxBytes / 1024 / 1024 * 10) / 10;
+      validationError = `File is larger than ${maxMb} MB. Please choose a smaller file.`;
+    } else if (!requirement.accepted_mime_types.includes(file.type)) {
+      const formats = requirement.accepted_mime_types
+        .map((type) => type === 'application/pdf' ? 'PDF' : type === 'image/jpeg' ? 'JPG' : type === 'image/png' ? 'PNG' : type === 'image/webp' ? 'WebP' : type)
+        .join(', ');
+      validationError = `This file format is not supported. Please upload ${formats}.`;
+    }
+    if (validationError) {
+      setApplicationFileErrors((current) => ({ ...current, [requirement.id]: validationError }));
+      input.value = '';
+      return;
+    }
+    setApplicationFiles((current) => ({ ...current, [requirement.id]: file }));
+    input.value = '';
+    setApplicationFileErrors((current) => {
+      const next = { ...current };
+      delete next[requirement.id];
+      return next;
+    });
+    setError('');
   }
 
   async function submitApplication(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!applyProgram) return;
+    if (!applyProgram || submissionInFlight.current) return;
     if (programRequirementsLoading) {
       setError('Wait for the scholarship document checklist to finish loading.');
       return;
     }
-    const requiredUploads = programRequirements.filter((requirement) => requirement.is_required);
-    const missingUploads = requiredUploads.filter((requirement) => !applicationFiles[requirement.id]);
+    const missingUploads = requiredProgramRequirements.filter((requirement) => !applicationFiles[requirement.id]);
     if (missingUploads.length) {
       setError(`Upload the required documents before submitting: ${missingUploads.map((item) => item.name).join(', ')}.`);
       return;
     }
+    if (Object.keys(applicationFileErrors).length) {
+      setError('Fix the highlighted document issues before submitting.');
+      return;
+    }
+    submissionInFlight.current = true;
     setSubmitPending(true);
     setError('');
     setNotice('');
     try {
-      const result = await readJson<{ application: { id: string; application_no: string }; possibleConflict: boolean }>(
-        await fetch('/api/student/applications', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            program_id: applyProgram.id, course, year_level: isAcademic(applyProgram) ? 1 : Number(yearLevel),
-            ...(isAcademic(applyProgram) ? { gwa: Number(gwa), lowest_grade: Number(lowestGrade) } : {}),
+      let application = createdApplication;
+      if (!application) {
+        const result = await readJson<{ application: { id: string; application_no: string; status: string }; possibleConflict: boolean }>(
+          await fetch('/api/student/applications', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              program_id: applyProgram.id, course, year_level: isAcademic(applyProgram) ? 1 : Number(yearLevel),
+              ...(isAcademic(applyProgram) ? { gwa: Number(gwa), lowest_grade: Number(lowestGrade) } : {}),
+            }),
           }),
-        }),
-      );
-      if (draftKey) window.localStorage.removeItem(draftKey);
-      setSubmitted({ reference: result.application.application_no, applicationId: result.application.id });
-      setHasActiveScholarshipConflict(result.possibleConflict);
-      const selectedRequirements = programRequirements;
+        );
+        application = result.application;
+        setCreatedApplication(application);
+        setHasActiveScholarshipConflict(result.possibleConflict);
+      }
       const uploadFailures: string[] = [];
       for (const [requirementId, file] of Object.entries(applicationFiles)) {
+        if (uploadedApplicationFiles[requirementId]) continue;
         const form = new FormData();
-        form.set('application_id', result.application.id);
+        form.set('application_id', application.id);
         form.set('requirement_id', requirementId);
         form.set('file', file);
         try {
           await readJson(await fetch('/api/documents', { method: 'POST', body: form }));
-        } catch {
-          uploadFailures.push(selectedRequirements.find((requirement) => requirement.id === requirementId)?.name ?? file.name);
+          setUploadedApplicationFiles((current) => ({ ...current, [requirementId]: true }));
+        } catch (cause) {
+          const name = programRequirements.find((requirement) => requirement.id === requirementId)?.name ?? file.name;
+          uploadFailures.push(`${name}: ${cause instanceof Error ? cause.message : 'Upload failed.'}`);
         }
       }
-      setNotice(uploadFailures.length
-        ? `Your application was submitted. These documents could not be uploaded: ${uploadFailures.join(', ')}. Upload them from Requirements & Documents.`
-        : 'Your application and selected documents were submitted. The application status is Pending review.');
+      if (uploadFailures.length) {
+        throw new Error(`Your application record was created, but these documents are not uploaded yet: ${uploadFailures.join(', ')}. Retry here to finish submitting, or close and upload them from Requirements & Documents.`);
+      }
+      setSubmitted({ reference: application.application_no, applicationId: application.id, status: application.status });
+      if (draftKey) window.localStorage.removeItem(draftKey);
+      setNotice('Your application and selected documents were submitted. The responsible office will review them.');
       await reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Your application could not be submitted.');
     } finally {
+      submissionInFlight.current = false;
       setSubmitPending(false);
     }
   }
@@ -907,88 +1051,201 @@ export function StudentWorkspace() {
       )}
 
       {applyProgram && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/50 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitPending) setApplyProgram(null); }}>
-          <section role="dialog" aria-modal="true" aria-labelledby="application-dialog-title" className="my-auto w-full max-w-2xl rounded-3xl bg-white p-5 shadow-2xl sm:p-7">
-            <div className="flex items-start justify-between gap-4"><div><Pill>{CATEGORY_LABELS[scholarshipCategory(applyProgram)]}</Pill><h2 id="application-dialog-title" className="mt-3 text-xl font-bold text-slate-900">Apply for {applyProgram.name}</h2><p className="mt-1 text-sm text-slate-600">Step {submitted ? 3 : applyStep + 1} of 3 · Details stay in this browser until you submit.</p></div><button type="button" aria-label="Close application" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100" onClick={() => setApplyProgram(null)}><X className="h-5 w-5" /></button></div>
-            {submitted ? <div className="mt-6 rounded-2xl border border-emerald-200 bg-emerald-50 p-5"><CheckCircle2 className="h-7 w-7 text-emerald-700" /><h3 className="mt-3 text-lg font-bold text-emerald-950">Application received</h3><p className="mt-2 text-sm text-emerald-900">Your application is recorded with status <strong>Pending review</strong>. Keep this reference number:</p><p className="mt-2 font-mono text-lg font-bold text-emerald-950">{submitted.reference}</p><p className="mt-3 text-sm text-emerald-900">Uploaded documents are saved to your application and will be reviewed by the responsible office. You can track the actual status in My Applications.</p><div className="mt-4 flex flex-wrap gap-3"><Link href="/student/applications" className="btn-primary">View My Applications</Link><Link href="/student/documents" className="btn-secondary">Review documents</Link><button type="button" className="btn-secondary" onClick={() => { setApplyProgram(null); setSubmitted(null); setCourse(''); setYearLevel('1'); }}>Done</button></div></div> : (
-              <form className="mt-6" onSubmit={(event) => {
-                if (applyStep < 2) {
-                  event.preventDefault();
-                  if (applyStep === 1 && isAcademic(applyProgram)) {
-                    const normalizedCourse = course.toLocaleLowerCase().replace(/[^a-z]/g, '');
-                    if (!['bsed', 'beed', 'bssw'].includes(normalizedCourse)) {
-                      setError('Academic Scholarship applications are limited to BS Ed, BE Ed, and BSSW. IT and HM are not eligible.');
-                      return;
-                    }
-                    if (Number(gwa) < 90 || Number(lowestGrade) < 85) {
-                      setError('To proceed, your GWA must be 90 or above and no subject grade may be below 85.');
-                      return;
-                    }
-                  }
-                  setError('');
-                  setApplyStep((step) => step + 1);
-                } else void submitApplication(event);
-              }}>
-                {applyStep === 0 && <div className="space-y-4">
-                  <div className="rounded-2xl bg-slate-50 p-4">
-                    <h3 className="font-semibold text-slate-900">Eligibility information</h3>
-                    {isAcademic(applyProgram) ? <ul className="mt-2 space-y-1 text-sm leading-6 text-slate-700">
-                      <li>Eligible programs: BS Ed, BE Ed, and BSSW. IT and HM are not eligible.</li>
-                      <li>Initial application for incoming first-year students with GWA 90 or above and no subject grade below 85.</li>
-                      <li>Continuation may extend up to fourth year if academic requirements are maintained. Continuing scholars do not submit a new application each year by default.</li>
-                    </ul> : <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{applyProgram.eligibility || 'Eligibility details have not been configured. Contact the responsible office to confirm before applying.'}</p>}
-                    {applyProgram.description && <p className="mt-3 text-sm leading-6 text-slate-600">{applyProgram.description}</p>}
-                  </div>
-                  <div className="rounded-2xl border border-sky-100 bg-sky-50 p-4">
-                    <h3 className="font-semibold text-slate-900">Required documents</h3>
-                    {isAcademic(applyProgram) && <p className="mt-1 text-sm text-slate-700">Report Card, Ranking Certificate, and Birth Certificate.</p>}
-                    {programRequirementsLoading ? <p role="status" className="mt-2 text-sm text-slate-600">Loading the configured upload checklist…</p>
-                      : programRequirements.length ? <ul className="mt-3 space-y-2">{programRequirements.map((requirement) => <li key={requirement.id} className="text-sm text-slate-800"><strong>{requirement.name}</strong> · {requirement.is_required ? 'Required' : 'Optional'}<span className="block text-xs text-slate-600">{requirement.description || 'No upload instructions provided.'} · {requirement.accepted_mime_types.map((type) => type === 'application/pdf' ? 'PDF' : type === 'image/jpeg' ? 'JPEG' : type === 'image/png' ? 'PNG' : type === 'image/webp' ? 'WebP' : type).join(', ')} · up to {Math.round(requirement.max_file_size_bytes / 1024 / 1024 * 10) / 10} MB</span></li>)}</ul>
-                        : <p className="mt-2 text-sm text-amber-900">No upload checklist is configured for this opportunity. Contact its responsible office before submitting.</p>}
-                  </div>
-                  {isAcademic(applyProgram) && <div className="rounded-xl border border-sky-200 bg-white p-4 text-sm"><strong>Confirmed benefit:</strong> 100% tuition coverage. Miscellaneous and other fees remain the student’s responsibility.</div>}
-                  {applyProgram.responsible_office && <p className="text-sm text-slate-600">Responsible office: <strong>{applyProgram.responsible_office}</strong></p>}
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-2 backdrop-blur-[2px] sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeApplication(); }}>
+          <section ref={applicationDialogRef} role="dialog" aria-modal="true" aria-labelledby="application-dialog-title" tabIndex={-1} className="flex max-h-[calc(100dvh-1rem)] w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 sm:max-h-[calc(100dvh-2rem)] sm:w-[min(1100px,calc(100vw-2rem))] sm:rounded-3xl">
+            <header className="shrink-0 border-b border-slate-200 bg-white px-4 py-4 sm:px-7 sm:py-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-sky-800">Scholarship application</p>
+                  <h2 id="application-dialog-title" className="mt-1 text-lg font-bold leading-tight text-slate-950 sm:text-2xl">Apply for {applyProgram.name}</h2>
+                  <p className="mt-1 text-sm text-slate-600">Complete the steps below to submit your scholarship application.</p>
+                </div>
+                <button type="button" aria-label="Close application" className="shrink-0 rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900 focus-visible:ring-2 focus-visible:ring-sky-700" onClick={closeApplication} disabled={submitPending}><X className="h-5 w-5" /></button>
+              </div>
+              {!submitted && <nav aria-label="Application progress" className="mt-4 grid grid-cols-3 gap-2 sm:mt-5 sm:gap-4">
+                {[
+                  { label: 'Get started', detail: 'Review the opportunity' },
+                  { label: 'Your details', detail: 'Details and documents' },
+                  { label: 'Review & submit', detail: 'Check before sending' },
+                ].map((step, index) => {
+                  const complete = index < applyStep;
+                  const active = index === applyStep;
+                  return <div key={step.label} aria-current={active ? 'step' : undefined} className="relative flex min-w-0 items-start gap-2 sm:gap-3">
+                    {index < 2 && <span aria-hidden="true" className={`absolute left-8 right-[-0.5rem] top-4 hidden h-px sm:block ${complete ? 'bg-sky-700' : 'bg-slate-200'}`} />}
+                    <span className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border text-sm font-bold ${active ? 'border-sky-700 bg-sky-700 text-white ring-4 ring-sky-100' : complete ? 'border-emerald-600 bg-emerald-600 text-white' : 'border-slate-300 bg-white text-slate-500'}`}>
+                      {complete ? <Check aria-hidden="true" className="h-4 w-4" /> : index + 1}
+                    </span>
+                    <span className="min-w-0 pt-0.5">
+                      <span className={`block truncate text-xs font-bold uppercase tracking-wide sm:text-sm ${active ? 'text-sky-900' : complete ? 'text-slate-800' : 'text-slate-500'}`}>{step.label}</span>
+                      <span className="mt-0.5 hidden text-xs text-slate-500 sm:block">{step.detail}</span>
+                    </span>
+                  </div>;
+                })}
+              </nav>}
+            </header>
+
+            {submitted ? <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-8">
+              <div className="mx-auto max-w-2xl rounded-2xl border border-emerald-200 bg-emerald-50 p-5 sm:p-8">
+                <span className="inline-flex rounded-2xl bg-emerald-100 p-3 text-emerald-800"><CheckCircle2 aria-hidden="true" className="h-8 w-8" /></span>
+                <h3 className="mt-4 text-xl font-bold text-emerald-950">Application submitted successfully</h3>
+                <p className="mt-2 text-sm leading-6 text-emerald-900">Your application for <strong>{applyProgram.name}</strong> was recorded with status <strong>{STATUS_LABELS[submitted.status] ?? submitted.status}</strong>.</p>
+                {submitted.reference && <p className="mt-4 text-sm text-emerald-900">Application reference <span className="ml-1 font-mono font-bold">{submitted.reference}</span></p>}
+                <p className="mt-3 text-sm leading-6 text-emerald-900">The responsible office will review your application and supporting documents. Submission does not mean the application has been approved.</p>
+                {notice && <p role="status" className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">{notice}</p>}
+                {error && <p role="alert" className="mt-4 rounded-xl border border-rose-300 bg-white p-3 text-sm text-rose-800">{error}</p>}
+                <div className="mt-6 flex flex-wrap gap-3">
+                  <Link href="/student/applications" className="btn-primary">View My Applications</Link>
+                  <Link href="/student/documents" className="btn-secondary">Review documents</Link>
+                  <button type="button" className="btn-secondary" onClick={() => { setApplyProgram(null); setSubmitted(null); setCreatedApplication(null); setUploadedApplicationFiles({}); setCourse(''); setYearLevel('1'); setApplicationFiles({}); }}>Done</button>
+                </div>
+              </div>
+            </div> : <form className="flex min-h-0 flex-1 flex-col" onSubmit={(event) => {
+              if (applyStep < 2) {
+                event.preventDefault();
+                continueApplication();
+              } else void submitApplication(event);
+            }}>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-7 sm:py-5">
+                {error && <p role="alert" className="mb-4 rounded-xl border border-rose-300 bg-rose-50 px-4 py-3 text-sm text-rose-900">{error}</p>}
+                {applyStep === 0 && <div className="grid gap-4 lg:grid-cols-2">
+                  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div><p className="text-xs font-bold uppercase tracking-wide text-sky-800">Opportunity overview</p><h3 className="mt-1 text-lg font-bold text-slate-950">{applyProgram.name}</h3></div>
+                      <Pill>{CATEGORY_LABELS[scholarshipCategory(applyProgram)]}</Pill>
+                    </div>
+                    <p className="mt-3 text-sm leading-6 text-slate-700">{applyProgram.description || 'No program description has been provided.'}</p>
+                    <dl className="mt-4 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-2">
+                      <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Availability</dt><dd className="mt-1"><Pill color={applicationStatus(applyProgram, workingScholarProgramSlots[applyProgram.id]) === 'Open' ? 'green' : applicationStatus(applyProgram, workingScholarProgramSlots[applyProgram.id]) === 'Closing Soon' ? 'amber' : 'slate'}>{applicationStatus(applyProgram, workingScholarProgramSlots[applyProgram.id])}</Pill></dd></div>
+                      <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Application deadline</dt><dd className="mt-1 flex items-center gap-1.5 text-sm font-medium text-slate-800"><CalendarDays aria-hidden="true" className="h-4 w-4 text-sky-800" />{niceDate(applyProgram.deadline)}</dd></div>
+                      <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Responsible office</dt><dd className="mt-1 flex items-center gap-1.5 text-sm font-medium text-slate-800"><Building2 aria-hidden="true" className="h-4 w-4 text-sky-800" />{applyProgram.responsible_office || applyProgram.assigned_office || 'Not specified'}</dd></div>
+                      {applyProgram.application_type === 'WORKING_SCHOLAR' && <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Available slots</dt><dd className="mt-1 text-sm font-medium text-slate-800">{workingScholarProgramSlots[applyProgram.id]?.configured ? `${workingScholarProgramSlots[applyProgram.id].remaining} of ${workingScholarProgramSlots[applyProgram.id].max_slots} remaining` : 'Not configured'}</dd></div>}
+                      {applyProgram.benefits && <div className="sm:col-span-2"><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benefits</dt><dd className="mt-1 whitespace-pre-wrap text-sm leading-5 text-slate-700">{applyProgram.benefits}</dd></div>}
+                    </dl>
+                  </section>
+                  <section className="rounded-2xl border border-sky-200 bg-sky-50/70 p-4 sm:p-5">
+                    <div className="flex items-center gap-2"><ShieldCheck aria-hidden="true" className="h-5 w-5 text-sky-800" /><h3 className="text-base font-bold text-slate-950">Eligibility checklist</h3></div>
+                    {applyProgram.requirements.length > 0 ? <ul className="mt-3 space-y-2.5">{applyProgram.requirements.map((item) => <li key={item} className="flex gap-2.5 text-sm leading-5 text-slate-700"><CheckCircle2 aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" /><span>{item}</span></li>)}</ul>
+                      : <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-slate-700">{applyProgram.eligibility || 'Eligibility details have not been configured. Please contact the responsible office to confirm before applying.'}</p>}
+                    {applyProgram.requirements.length > 0 && applyProgram.eligibility && <p className="mt-3 border-t border-sky-200 pt-3 text-sm leading-6 text-slate-700">{applyProgram.eligibility}</p>}
+                    <div className="mt-4 rounded-xl border border-sky-200 bg-white p-3 text-sm leading-5 text-slate-700">Before continuing, make sure you meet the eligibility requirements and have your required documents ready.</div>
+                    {programRequirementsLoading ? <p role="status" className="mt-3 text-xs text-slate-600">Loading this opportunity’s document checklist…</p>
+                      : <p className="mt-3 text-xs font-semibold text-sky-950">{requiredProgramRequirements.length} required document{requiredProgramRequirements.length === 1 ? '' : 's'}{programRequirements.some((requirement) => !requirement.is_required) ? ` · ${programRequirements.filter((requirement) => !requirement.is_required).length} optional` : ''}</p>}
+                  </section>
                 </div>}
-                {applyStep === 1 && <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="text-sm font-medium text-slate-700">{isAcademic(applyProgram) ? 'Selected program' : 'Course or academic program'}
-                    {isAcademic(applyProgram) ? <select className="input mt-1" value={course} required onChange={(event) => setCourse(event.target.value)}><option value="">Choose your program</option><option>BS Ed</option><option>BE Ed</option><option>BSSW</option><option>IT</option><option>HM</option></select>
-                      : <input className="input mt-1" value={course} required minLength={2} maxLength={120} onChange={(event) => setCourse(event.target.value)} />}
-                  </label>
-                  <label className="text-sm font-medium text-slate-700">{isAcademic(applyProgram) ? 'Applicant type' : 'Current year level'}
-                    {isAcademic(applyProgram) ? <input className="input mt-1 bg-slate-50" value="Incoming first-year student" readOnly />
-                      : <input className="input mt-1" type="number" min={1} max={8} required value={yearLevel} onChange={(event) => setYearLevel(event.target.value)} />}
-                  </label>
-                  {isAcademic(applyProgram) && <>
-                    <label className="text-sm font-medium text-slate-700">General Weighted Average (GWA)<input className="input mt-1" type="number" min={90} max={100} step="0.01" required value={gwa} onChange={(event) => setGwa(event.target.value)} /></label>
-                    <label className="text-sm font-medium text-slate-700">Lowest subject grade<input className="input mt-1" type="number" min={85} max={100} step="0.01" required value={lowestGrade} onChange={(event) => setLowestGrade(event.target.value)} /></label>
-                  </>}
-                  <p className="sm:col-span-2 text-xs text-slate-500">Your name and email are taken from your authenticated student profile.</p>
-                  {programRequirements.map((requirement) => <label key={requirement.id} className="sm:col-span-2 text-sm font-medium text-slate-700">{requirement.name}{requirement.is_required ? ' *' : ' (optional)'}
-                    <input className="input mt-1" type="file" accept={requirement.accepted_mime_types.join(',')} required={requirement.is_required} onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      if (!file) return;
-                      if (file.size > requirement.max_file_size_bytes || !requirement.accepted_mime_types.includes(file.type)) {
-                        setError(file.size > requirement.max_file_size_bytes ? `The ${requirement.name} file exceeds its configured size limit.` : `The selected ${requirement.name} file type is not accepted.`);
-                        event.currentTarget.value = '';
-                        return;
-                      }
-                      setError('');
-                      setApplicationFiles((current) => ({ ...current, [requirement.id]: file }));
-                    }} />
-                    <span className="block text-xs font-normal text-slate-500">{requirement.accepted_mime_types.map((type) => type.split('/')[1].toUpperCase()).join(', ')} · max {Math.round(requirement.max_file_size_bytes / 1024 / 1024 * 10) / 10} MB{applicationFiles[requirement.id] ? ` · Selected: ${applicationFiles[requirement.id].name}` : ''}</span>
-                  </label>)}
-                  {!programRequirementsLoading && programRequirements.length === 0 && <p className="sm:col-span-2 text-sm text-amber-900">Document uploads are not available until the responsible office configures the opportunity’s checklist.</p>}
+
+                {applyStep === 1 && <div className="grid items-start gap-4 lg:grid-cols-[0.78fr_1.22fr]">
+                  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                    <div className="flex items-center gap-2"><GraduationCap aria-hidden="true" className="h-5 w-5 text-sky-800" /><h3 className="text-base font-bold text-slate-950">Your academic information</h3></div>
+                    <p className="mt-1 text-sm text-slate-600">Tell us about your current academic status.</p>
+                    <div className="mt-4 space-y-3">
+                      <label className="block text-sm font-semibold text-slate-700">Student name<input className="input mt-1 bg-slate-50" value={profile?.full_name ?? ''} readOnly aria-label="Student name from your profile" /></label>
+                      <label className="block text-sm font-semibold text-slate-700">Student email<input className="input mt-1 bg-slate-50" type="email" value={profile?.email ?? ''} readOnly aria-label="Student email from your profile" /></label>
+                      <label className="block text-sm font-semibold text-slate-700">{isAcademic(applyProgram) ? 'Course or academic program' : 'Course or academic program'}
+                        {isAcademic(applyProgram) ? <select className="input mt-1" value={course} required onChange={(event) => setCourse(event.target.value)}><option value="">Choose your program</option><option>BS Ed</option><option>BE Ed</option><option>BSSW</option><option>IT</option><option>HM</option></select>
+                          : <input className="input mt-1" value={course} required minLength={2} maxLength={120} onChange={(event) => setCourse(event.target.value)} placeholder="e.g. Bachelor of Science in…" />}
+                      </label>
+                      <label className="block text-sm font-semibold text-slate-700">{isAcademic(applyProgram) ? 'Current year level' : 'Current year level'}
+                        {isAcademic(applyProgram) ? <input className="input mt-1 bg-slate-50" value="1 · Incoming first-year student" readOnly />
+                          : <input className="input mt-1" type="number" min={1} max={8} required value={yearLevel} onChange={(event) => setYearLevel(event.target.value)} />}
+                      </label>
+                      {isAcademic(applyProgram) && <>
+                        <label className="block text-sm font-semibold text-slate-700">General Weighted Average (GWA)<input className="input mt-1" type="number" min={90} max={100} step="0.01" required value={gwa} onChange={(event) => setGwa(event.target.value)} /></label>
+                        <label className="block text-sm font-semibold text-slate-700">Lowest subject grade<input className="input mt-1" type="number" min={85} max={100} step="0.01" required value={lowestGrade} onChange={(event) => setLowestGrade(event.target.value)} /></label>
+                      </>}
+                    </div>
+                    <p className="mt-3 text-xs leading-5 text-slate-500">Your name and email come from your authenticated student profile.</p>
+                  </section>
+
+                  <section className="min-w-0 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div><div className="flex items-center gap-2"><FileCheck2 aria-hidden="true" className="h-5 w-5 text-sky-800" /><h3 className="text-base font-bold text-slate-950">Your required documents</h3></div><p className="mt-1 text-sm text-slate-600">Upload clear copies of the documents needed for your application.</p></div>
+                      <span className="rounded-full bg-sky-100 px-3 py-1 text-xs font-bold text-sky-900">{selectedRequiredDocuments} of {requiredProgramRequirements.length} required</span>
+                    </div>
+                    {requiredProgramRequirements.length > 0 && <div className="mt-3" aria-label={`${selectedRequiredDocuments} of ${requiredProgramRequirements.length} required documents selected`}>
+                      <div className="h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-200" style={{ width: `${selectedRequiredDocuments / requiredProgramRequirements.length * 100}%` }} /></div>
+                    </div>}
+                    {programRequirementsLoading ? <p role="status" className="mt-5 text-sm text-slate-600">Loading configured documents…</p>
+                      : programRequirements.length ? <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:max-h-[calc(100dvh-350px)] lg:overflow-y-auto lg:pr-1">
+                        {programRequirements.map((requirement) => {
+                          const file = applicationFiles[requirement.id];
+                          const errorMessage = applicationFileErrors[requirement.id];
+                          const acceptedFormats = requirement.accepted_mime_types.map((type) => type === 'application/pdf' ? 'PDF' : type === 'image/jpeg' ? 'JPG' : type === 'image/png' ? 'PNG' : type === 'image/webp' ? 'WebP' : type).join(', ');
+                          const maxMb = Math.round(Math.min(requirement.max_file_size_bytes, 10 * 1024 * 1024) / 1024 / 1024 * 10) / 10;
+                          return <article key={requirement.id} className={`flex min-w-0 flex-col rounded-xl border p-3 ${errorMessage ? 'border-rose-300 bg-rose-50/60' : file ? 'border-emerald-200 bg-emerald-50/40' : 'border-slate-200 bg-slate-50/70'}`}>
+                            <div className="flex items-start gap-2.5">
+                              <span className="mt-0.5 rounded-lg bg-white p-1.5 text-sky-800 shadow-sm"><FileText aria-hidden="true" className="h-4 w-4" /></span>
+                              <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-1.5"><h4 className="text-sm font-bold leading-5 text-slate-900">{requirement.name}</h4><Pill color={requirement.is_required ? 'amber' : 'slate'}>{requirement.is_required ? 'Required' : 'Optional'}</Pill></div>
+                                <p className="mt-1 text-xs leading-4 text-slate-600">{requirement.description || 'Upload a clear copy of this document.'}</p>
+                              </div>
+                            </div>
+                            <p className="mt-2 text-[11px] leading-4 text-slate-500">{acceptedFormats} · max {maxMb} MB</p>
+                            <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
+                              <span className={`min-w-0 truncate text-xs font-medium ${file ? 'text-emerald-800' : 'text-slate-500'}`} title={file?.name}>{file ? `File selected: ${file.name}` : 'Not selected'}</span>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {file && <button type="button" aria-label={`Remove ${requirement.name}`} className="rounded-md p-1.5 text-slate-500 hover:bg-white hover:text-rose-700 focus-visible:ring-2 focus-visible:ring-sky-700" onClick={() => {
+                                  setApplicationFiles((current) => { const next = { ...current }; delete next[requirement.id]; return next; });
+                                  setApplicationFileErrors((current) => { const next = { ...current }; delete next[requirement.id]; return next; });
+                                }}><X aria-hidden="true" className="h-4 w-4" /></button>}
+                                <label className="inline-flex min-h-9 cursor-pointer items-center gap-1.5 rounded-lg border border-sky-300 bg-white px-2.5 text-xs font-semibold text-sky-900 transition hover:border-sky-500 hover:bg-sky-50 focus-within:ring-2 focus-within:ring-sky-700">
+                                  <CloudUpload aria-hidden="true" className="h-4 w-4" />{file ? 'Replace' : 'Choose file'}
+                                  <input className="sr-only" type="file" accept={requirement.accepted_mime_types.join(',')} aria-label={`${file ? 'Replace' : 'Choose'} ${requirement.name}`} aria-describedby={`${requirement.id}-help${errorMessage ? ` ${requirement.id}-error` : ''}`} onChange={(event) => selectApplicationFile(requirement, event.target.files?.[0], event.currentTarget)} />
+                                </label>
+                              </div>
+                            </div>
+                            <span id={`${requirement.id}-help`} className="sr-only">{acceptedFormats}, maximum {maxMb} MB</span>
+                            {errorMessage && <p id={`${requirement.id}-error`} role="alert" className="mt-2 text-xs font-medium text-rose-800">{errorMessage}</p>}
+                          </article>;
+                        })}
+                      </div> : <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm leading-5 text-amber-950">No document checklist is configured for this opportunity. The responsible office can confirm what to provide.</p>}
+                    {programRequirements.some((requirement) => !requirement.is_required) && <p className="mt-2 text-xs text-slate-500">Optional files do not count toward the required document total.</p>}
+                  </section>
                 </div>}
-                {applyStep === 2 && <div className="rounded-2xl bg-sky-50 p-5">
-                  <h3 className="font-semibold text-slate-900">Review before submitting</h3>
-                  <dl className="mt-3 space-y-2 text-sm"><div><dt className="inline font-medium text-slate-700">Program: </dt><dd className="inline text-slate-900">{applyProgram.name}</dd></div><div><dt className="inline font-medium text-slate-700">Applicant: </dt><dd className="inline text-slate-900">{profile?.full_name || 'Your student profile'}</dd></div><div><dt className="inline font-medium text-slate-700">Course / year: </dt><dd className="inline text-slate-900">{course}, Year {isAcademic(applyProgram) ? '1' : yearLevel}</dd></div>{isAcademic(applyProgram) && <div><dt className="inline font-medium text-slate-700">GWA / lowest grade: </dt><dd className="inline text-slate-900">{gwa} / {lowestGrade}</dd></div>}<div><dt className="inline font-medium text-slate-700">Documents: </dt><dd className="inline text-slate-900">{Object.values(applicationFiles).map((file) => file.name).join(', ') || 'None selected'}</dd></div></dl>
-                  {hasActiveScholarshipConflict && <p className="mt-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"><strong>Possible scholarship conflict:</strong> You have another active internal scholarship application or award. The school does not allow two internal scholarships simultaneously. This is a warning for office review, not an automatic rejection; you may continue or contact the responsible office to select one.</p>}
-                  {!conflictCheckLoaded && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">Your existing applications could not be checked. Retry loading your information before submitting.</p>}
-                  <p className="mt-4 text-sm text-slate-700">Submitting records this application with its current status. Review staff will verify your information and documents.</p>
+
+                {applyStep === 2 && <div className="grid gap-4 lg:grid-cols-2">
+                  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                    <div className="flex items-center gap-2"><GraduationCap aria-hidden="true" className="h-5 w-5 text-sky-800" /><h3 className="text-base font-bold text-slate-950">Scholarship details</h3></div>
+                    <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-2">
+                      <div className="sm:col-span-2"><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Program</dt><dd className="mt-1 font-semibold text-slate-900">{applyProgram.name}</dd></div>
+                      <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Category</dt><dd className="mt-1 text-slate-800">{CATEGORY_LABELS[scholarshipCategory(applyProgram)]}</dd></div>
+                      <div><dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">Responsible office</dt><dd className="mt-1 text-slate-800">{applyProgram.responsible_office || applyProgram.assigned_office || 'Not specified'}</dd></div>
+                    </dl>
+                    <div className="mt-4 border-t border-slate-100 pt-4"><h4 className="text-sm font-bold text-slate-900">Applicant information</h4><dl className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
+                      <div><dt className="text-xs font-semibold text-slate-500">Student</dt><dd className="mt-0.5 text-slate-800">{profile?.full_name || 'Name unavailable'}</dd></div>
+                      <div><dt className="text-xs font-semibold text-slate-500">Email</dt><dd className="mt-0.5 break-words text-slate-800">{profile?.email || 'Email unavailable'}</dd></div>
+                      <div><dt className="text-xs font-semibold text-slate-500">Course / academic program</dt><dd className="mt-0.5 text-slate-800">{course}</dd></div>
+                      <div><dt className="text-xs font-semibold text-slate-500">Current year level</dt><dd className="mt-0.5 text-slate-800">{isAcademic(applyProgram) ? '1 · Incoming first-year student' : yearLevel}</dd></div>
+                      {isAcademic(applyProgram) && <div className="sm:col-span-2"><dt className="text-xs font-semibold text-slate-500">GWA / lowest subject grade</dt><dd className="mt-0.5 text-slate-800">{gwa} / {lowestGrade}</dd></div>}
+                    </dl></div>
+                  </section>
+                  <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+                    <div className="flex items-center justify-between gap-3"><div className="flex items-center gap-2"><FileCheck2 aria-hidden="true" className="h-5 w-5 text-sky-800" /><h3 className="text-base font-bold text-slate-950">Document checklist</h3></div><span className="text-xs font-bold text-slate-600">{selectedRequiredDocuments} / {requiredProgramRequirements.length} required</span></div>
+                    {programRequirements.length ? <ul className="mt-3 divide-y divide-slate-100">
+                      {programRequirements.map((requirement) => {
+                        const file = applicationFiles[requirement.id];
+                        const errorMessage = applicationFileErrors[requirement.id];
+                        return <li key={requirement.id} className="flex min-w-0 items-start gap-2.5 py-2.5">
+                          {errorMessage ? <X aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-rose-700" /> : file ? <CheckCircle2 aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" /> : <Clock3 aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />}
+                          <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-800">{requirement.name} <span className="font-normal text-slate-500">· {requirement.is_required ? 'Required' : 'Optional'}</span></span>
+                            <span className={`block truncate text-xs ${errorMessage ? 'text-rose-800' : file ? 'text-emerald-800' : 'text-slate-500'}`} title={file?.name}>{errorMessage || (file ? `Selected: ${file.name}` : 'Missing file')}</span>
+                          </span>
+                        </li>;
+                      })}
+                    </ul> : <p className="mt-3 text-sm text-slate-600">No document checklist is configured for this opportunity.</p>}
+                    <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3"><h4 className="text-sm font-bold text-amber-950">Important reminder</h4><p className="mt-1 text-sm leading-5 text-amber-900">The responsible office will review your application and documents. Submitting does not automatically mean you have been approved.</p></div>
+                  </section>
+                  {hasActiveScholarshipConflict && <p className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm leading-5 text-amber-950 lg:col-span-2"><strong>Possible scholarship conflict:</strong> You have another active internal scholarship application or award. This is a warning for office review, not an automatic rejection; you may continue or contact the responsible office.</p>}
+                  {!conflictCheckLoaded && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800 lg:col-span-2">Your existing applications could not be checked. Retry loading your information before submitting.</p>}
                 </div>}
-                <div className="mt-6 flex flex-wrap justify-between gap-3"><button type="button" className="btn-secondary" onClick={() => applyStep === 0 ? setApplyProgram(null) : setApplyStep((step) => step - 1)}>{applyStep === 0 ? 'Cancel' : 'Back'}</button><button type="submit" className="btn-primary inline-flex items-center gap-2" disabled={submitPending || !applyProgram.is_active || programRequirementsLoading || (applyStep === 2 && !conflictCheckLoaded)}>{submitPending && <Loader2 className="h-4 w-4 animate-spin" />}{applyStep < 2 ? 'Continue' : submitPending ? 'Submitting…' : 'Confirm and submit'}</button></div>
-              </form>
-            )}
+              </div>
+
+              <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-slate-200 bg-white px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-7">
+                <button type="button" className="btn-secondary" onClick={() => applyStep === 0 ? closeApplication() : (setError(''), setApplyStep((step) => step - 1))} disabled={submitPending || Boolean(createdApplication && applyStep === 2)}>{applyStep === 0 ? 'Cancel' : 'Back to previous step'}</button>
+                <button type="submit" className="btn-primary inline-flex min-h-11 items-center justify-center gap-2" disabled={submitPending || !applyProgram.is_active || programRequirementsLoading || (applyStep === 2 && !conflictCheckLoaded)}>
+                  {submitPending ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : applyStep < 2 ? <ArrowRight aria-hidden="true" className="h-4 w-4" /> : null}
+                  {submitPending ? 'Submitting…' : applyStep === 0 ? 'Continue to Your Details' : applyStep === 1 ? 'Continue to Review' : 'Confirm and Submit Application'}
+                </button>
+              </footer>
+            </form>}
           </section>
         </div>
       )}

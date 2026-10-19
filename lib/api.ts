@@ -32,7 +32,7 @@ export async function parseJson<T>(request: Request, schema: ZodType<T, ZodTypeD
 
 // Maps Postgres/PostgREST errors to safe HTTP responses. Messages raised by our own
 // SQL functions (P0001) are written for end users; everything else stays generic.
-export function dbError(error: { code?: string; message: string }) {
+export function dbError(error: { code?: string; message: string }, operation?: string) {
   switch (error.code) {
     case '42P01':
     case '42883':
@@ -47,6 +47,11 @@ export function dbError(error: { code?: string; message: string }) {
     case 'PGRST302':
       return jsonError('Your sign-in session is no longer valid. Please sign in again.', 401);
     case '42501':
+      console.error('Database authorization denied:', {
+        operation: operation ?? 'unclassified database operation',
+        sqlstate: error.code,
+        message: error.message,
+      });
       return jsonError('You do not have permission to perform this action.', 403);
     case 'P0002':
       return jsonError(error.message, 404);

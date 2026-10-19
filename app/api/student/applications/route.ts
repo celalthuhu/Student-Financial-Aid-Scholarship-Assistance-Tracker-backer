@@ -42,7 +42,7 @@ export async function GET() {
   const { data, error } = await getActiveInternalApplications(auth.ctx.supabase, auth.ctx.profile.id);
   if (error) {
     console.error('Student scholarship conflict query failed:', error.code, error.message);
-    return dbError(error);
+    return dbError(error, 'GET /api/student/applications: check existing scholarship conflict');
   }
   return NextResponse.json({
     hasActiveConflict: (data?.applications.length ?? 0) > 0,
@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     .select('id,name,application_type,is_active,category,opens_at,deadline,assigned_office')
     .eq('id', parsed.data.program_id)
     .maybeSingle();
-  if (programError) return dbError(programError);
+  if (programError) return dbError(programError, 'POST /api/student/applications: load selected program');
   if (!program || !program.is_active) return jsonError('That program is not currently accepting applications.', 400);
 
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Manila' }).format(new Date());
@@ -87,7 +87,7 @@ export async function POST(request: NextRequest) {
 
   if (program.application_type === 'WORKING_SCHOLAR') {
     const { data: slots, error: slotsError } = await auth.ctx.supabase.rpc('student_working_scholar_program_slots');
-    if (slotsError) return dbError(slotsError);
+    if (slotsError) return dbError(slotsError, 'POST /api/student/applications: check Working Scholar slots RPC');
     const slotSummary = Array.isArray(slots)
       ? slots.find((entry: { program_id?: string }) => entry.program_id === program.id)
       : null;
@@ -104,13 +104,13 @@ export async function POST(request: NextRequest) {
     .not('status', 'in', '(DENIED,INACTIVE)')
     .limit(1)
     .maybeSingle();
-  if (existingError) return dbError(existingError);
+  if (existingError) return dbError(existingError, 'POST /api/student/applications: check duplicate application');
   if (existing) return jsonError('You already have an active application for this program.', 409);
 
   const { data: activeApplications, error: conflictError } = await getActiveInternalApplications(auth.ctx.supabase, auth.ctx.profile.id);
   if (conflictError) {
     console.error('Student scholarship conflict query failed:', conflictError.code, conflictError.message);
-    return dbError(conflictError);
+    return dbError(conflictError, 'POST /api/student/applications: check existing scholarship conflict');
   }
   const possibleConflict = (activeApplications?.applications.length ?? 0) > 0;
 
@@ -129,6 +129,8 @@ export async function POST(request: NextRequest) {
     status: 'PENDING',
     created_by: auth.ctx.profile.id,
   }).select('id,application_no,status,application_date,application_type').single();
-  if (error) return dbError(error);
+  if (error) {
+    return dbError(error, 'POST /api/student/applications: insert application and return its reference');
+  }
   return NextResponse.json({ application: data, possibleConflict }, { status: 201 });
 }

@@ -30,10 +30,12 @@ export async function POST(request: NextRequest) {
   if (isStudent && (!hasFile || !parsed.data.requirement_id)) {
     return jsonError('Choose a file for one of the configured requirements.', 422);
   }
-  const { data: application, error: applicationError } = await auth.ctx.supabase
+  let applicationQuery = auth.ctx.supabase
     .from('working_scholar_applications').select('application_type,status')
-    .eq('id', parsed.data.application_id).maybeSingle();
-  if (applicationError) return dbError(applicationError);
+    .eq('id', parsed.data.application_id);
+  if (isStudent) applicationQuery = applicationQuery.eq('student_user_id', auth.ctx.profile.id);
+  const { data: application, error: applicationError } = await applicationQuery.maybeSingle();
+  if (applicationError) return dbError(applicationError, 'POST /api/documents: verify application ownership');
   if (!application) return jsonError('Application not found.', 404);
   if (isStudent && application.status !== 'PENDING' && !parsed.data.requirement_id) {
     return jsonError('Only requested requirement corrections can be uploaded after the application enters review.', 403);
@@ -50,7 +52,7 @@ export async function POST(request: NextRequest) {
         .select('application_type,is_active,accepted_mime_types,max_file_size_bytes')
         .eq('id', parsed.data.requirement_id);
     const { data: requirement, error: requirementError } = await requirementQuery.maybeSingle();
-    if (requirementError) return dbError(requirementError);
+    if (requirementError) return dbError(requirementError, 'POST /api/documents: verify application requirement');
     if (!requirement || requirement.application_type !== application.application_type) {
       return jsonError('Choose a requirement for this application.', 422);
     }
@@ -59,7 +61,7 @@ export async function POST(request: NextRequest) {
         .from('application_documents').select('id').eq('application_id', parsed.data.application_id)
         .eq('requirement_id', parsed.data.requirement_id).in('review_status', ['NEEDS_CORRECTION', 'REJECTED'])
         .limit(1).maybeSingle();
-      if (correctionError) return dbError(correctionError);
+      if (correctionError) return dbError(correctionError, 'POST /api/documents: verify requested correction');
       if (!correction) return jsonError('Only requested requirement corrections can be uploaded after the application enters review.', 403);
     }
     acceptedTypes = requirement.accepted_mime_types;
@@ -70,14 +72,22 @@ export async function POST(request: NextRequest) {
   if (hasFile) {
     if (file.size > maxUploadBytes) return jsonError(`File is too large. The limit is ${Math.floor(maxUploadBytes / 1024 / 1024 * 10) / 10} MB.`, 413);
     if (!acceptedTypes.includes(file.type)) return jsonError('This file type is not accepted for the selected requirement.', 415);
-    if (!ALLOWED_UPLOAD_TYPES.includes(file.type as typeof ALLOWED_UPLOAD_TYPES[number])) {
+    if (!ALLOWED_UPLOAD_TYPES.some((allowedType) => allowedType === file.type)) {
       return jsonError('This file type is not supported by secure storage.', 415);
     }
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-80);
     storagePath = `${parsed.data.application_id}/${crypto.randomUUID()}-${safeName}`;
     const { error: upErr } = await auth.ctx.supabase.storage
       .from(DOCUMENT_BUCKET).upload(storagePath, file, { contentType: file.type, upsert: false });
-    if (upErr) { console.error('Upload failed:', upErr.message); return jsonError('The file could not be uploaded. Nothing was saved.', 500); }
+    if (upErr) {
+      console.error('POST /api/documents: private storage upload denied or failed:', {
+        httpStatus: upErr.statusCode,
+        message: upErr.message,
+      });
+      if (upErr.statusCode === '401') return jsonError('Your sign-in session is no longer valid. Please sign in again.', 401);
+      if (upErr.statusCode === '403') return jsonError('You do not have permission to upload a document for this application.', 403);
+      return jsonError('The file could not be uploaded. Nothing was saved.', 500);
+    }
   }
 
   const { data, error } = await auth.ctx.supabase.from('application_documents').insert({
@@ -91,8 +101,11 @@ export async function POST(request: NextRequest) {
   }).select('id').single();
 
   if (error) {
-    if (storagePath) await auth.ctx.supabase.storage.from(DOCUMENT_BUCKET).remove([storagePath]);
-    return dbError(error);
+    if (storagePath) {
+      const { error: cleanupError } = await auth.ctx.supabase.storage.from(DOCUMENT_BUCKET).remove([storagePath]);
+      if (cleanupError) console.error('Orphaned application document cleanup failed:', cleanupError.message);
+    }
+    return dbError(error, 'POST /api/documents: insert document metadata and return its reference');
   }
   return NextResponse.json(data, { status: 201 });
 }
